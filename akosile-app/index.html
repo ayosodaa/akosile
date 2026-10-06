@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Akosile Transcriber</title>
+<meta name="description" content="Private transcription with Whisper running in your browser.">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+</head>
+<body>
+<header class="top">
+  <h1 class="brand">Akosile<span>.</span></h1>
+  <p class="tagline">Whisper runs inside this browser tab, so your recordings never leave your computer.</p>
+  <span class="device" id="device">Checking your graphics card</span>
+</header>
+
+<main class="desk">
+
+  <!-- Settings rail -->
+  <section class="panel rail" aria-label="Recording and settings">
+    <div class="field">
+      <span class="label">Recording</span>
+      <label class="drop" id="drop" for="file">
+        <strong>Choose an audio or video file</strong>
+        <small>You can also drop it here. MP3, M4A, WAV, OGG, WEBM and MP4 all work.</small>
+      </label>
+      <input type="file" id="file" accept="audio/*,video/*" hidden>
+      <p class="filemeta" id="filemeta" hidden></p>
+    </div>
+
+    <div class="field">
+      <label class="label" for="model">Whisper model</label>
+      <select id="model">
+        <option value="onnx-community/whisper-large-v3-turbo">Large v3 Turbo: best for accents (about 1 GB, needs a graphics card)</option>
+        <option value="onnx-community/whisper-small">Small: balanced (about 250 MB)</option>
+        <option value="onnx-community/whisper-base">Base: fastest, least accurate (about 80 MB)</option>
+      </select>
+      <p class="help" id="modelHelp">Your browser downloads the model the first time and keeps it for next time.</p>
+    </div>
+
+    <div class="row" style="gap:10px">
+      <div class="field" style="flex:1 1 130px">
+        <label class="label" for="lang">Spoken language</label>
+        <select id="lang">
+          <option value="english">English</option>
+          <option value="yoruba">Yoruba</option>
+          <option value="hausa">Hausa</option>
+          <option value="swahili">Swahili</option>
+          <option value="french">French</option>
+          <option value="">Detect it for me</option>
+        </select>
+      </div>
+      <div class="field" style="flex:1 1 130px">
+        <label class="label" for="task">Output</label>
+        <select id="task">
+          <option value="transcribe">Same language</option>
+          <option value="translate">Translate to English</option>
+        </select>
+      </div>
+    </div>
+    <p class="help" style="margin-top:-6px">Setting the language yourself stops Whisper from guessing wrong on a Nigerian accent.</p>
+
+    <button class="btn primary" id="go" type="button" disabled>Transcribe</button>
+    <button class="btn" id="stop" type="button" hidden>Stop after this section</button>
+
+    <div class="status" id="status" aria-live="polite">
+      <div class="bar"><i id="barFill"></i></div>
+      <span class="msg" id="msg">Choose a recording to begin.</span>
+    </div>
+
+    <p class="notice" id="noGpu" hidden>This browser has no graphics card access (WebGPU), so transcription runs on the processor. The Small model is the most practical choice here. Chrome or Edge on a recent laptop gives the best speed.</p>
+
+    <details id="vocabBox">
+      <summary>Names and terms Whisper gets wrong</summary>
+      <div class="field">
+      <label class="label" for="vocab">Corrections</label>
+      <textarea id="vocab" rows="5" spellcheck="false" placeholder="olu wa pelumi => Oluwapelumi&#10;in como co => Inkomoko&#10;Lekki"></textarea>
+      <p class="help">Whisper does not know local names, so list fixes here as <code>heard =&gt; correct</code>. A word on its own line fixes its spelling and capitals. The app applies these to every new transcript.</p>
+      <div class="row" style="margin-top:8px"><button class="btn small" id="applyVocab" type="button">Apply to this transcript</button></div>
+    </div>
+    </details>
+
+    <details>
+      <summary>Recent transcripts</summary>
+      <div class="history" id="history"></div>
+    </details>
+  </section>
+
+  <!-- Transcript -->
+  <section class="panel page" aria-label="Transcript">
+    <div class="page-head">
+      <div class="title-row">
+        <h2 id="docTitle">Planning call sample</h2>
+        <span class="pill" id="examplePill">Example</span>
+      </div>
+      <audio id="player" controls hidden></audio>
+      <div class="tools">
+        <label class="check"><input type="checkbox" id="showTimes" checked> Timestamps</label>
+        <label class="check"><input type="checkbox" id="follow" checked> Follow playback</label>
+        <select id="speed" class="btn small" aria-label="Playback speed" style="width:auto">
+          <option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option>
+        </select>
+        <span class="sep"></span>
+        <button class="btn small" data-export="txt" type="button">TXT</button>
+        <button class="btn small" data-export="srt" type="button">SRT</button>
+        <button class="btn small" data-export="vtt" type="button">VTT</button>
+        <button class="btn small" data-export="doc" type="button">Word</button>
+        <button class="btn small" data-export="md" type="button">Markdown</button>
+        <button class="btn small" id="copyAll" type="button">Copy text</button>
+      </div>
+    </div>
+    <div class="transcript" id="transcript"></div>
+  </section>
+
+  <!-- Summary -->
+  <section class="panel notes" aria-label="Summary and actions">
+    <div class="row split">
+      <h2>Summary and actions</h2>
+    </div>
+    <div class="field">
+      <label class="label" for="context">What is this recording?</label>
+      <input type="text" id="context" placeholder="A client call about the Q4 pipeline">
+      <p class="help">A line of context helps Claude name the right people and decisions.</p>
+    </div>
+    <div class="row">
+      <button class="btn primary" id="summarise" type="button">Summarise with Claude</button>
+      <button class="btn" id="copyPrompt" type="button">Copy prompt for Claude chat</button>
+    </div>
+    <p class="help" id="sumMsg">The first button calls the Claude API with your key. The second copies a ready prompt that you can paste into a normal Claude chat at no extra cost.</p>
+    <div class="md" id="summary"></div>
+    <details>
+      <summary>Claude API settings</summary>
+      <div class="field">
+        <label class="label" for="apiKey">Anthropic API key</label>
+        <input type="password" id="apiKey" placeholder="sk-ant-..." autocomplete="off">
+        <p class="help">This browser stores the key and sends it only to api.anthropic.com.</p>
+      </div>
+      <div class="field">
+        <label class="label" for="apiModel">Claude model</label>
+        <input type="text" id="apiModel" value="claude-sonnet-5-5">
+      </div>
+    </details>
+  </section>
+</main>
+
+<div class="toast" id="toast" role="status"></div>
+
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>
