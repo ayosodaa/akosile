@@ -175,6 +175,61 @@ import './style.css';
   ['dragleave', 'drop'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
   drop.addEventListener('drop', (e) => takeFile(e.dataTransfer.files[0]));
 
+  // ---------- import transcripts from Buzz, Colab or any subtitle file ----------
+  function toSeconds(t) {
+    const m = /(?:(\d+):)?(\d{1,2}):(\d{1,2})(?:[.,](\d{1,3}))?/.exec(t.trim());
+    if (!m) return null;
+    return (+(m[1] || 0)) * 3600 + (+m[2]) * 60 + (+m[3]) + (m[4] ? +m[4].padEnd(3, '0') / 1000 : 0);
+  }
+  function parseTranscript(text, name) {
+    text = text.replace(/^\uFEFF/, '').replace(/\r/g, '');
+    if (/\.json$/i.test(name)) {
+      const j = JSON.parse(text);
+      const list = Array.isArray(j) ? j : (j.segments || []);
+      return list.map((s) => ({ start: +s.start || 0, end: +s.end || +s.start || 0, text: String(s.text || '').trim() })).filter((s) => s.text);
+    }
+    if (text.includes('-->')) {
+      const out = [];
+      for (const block of text.split(/\n\s*\n/)) {
+        const lines = block.split('\n').map((l) => l.trim()).filter(Boolean);
+        const i = lines.findIndex((l) => l.includes('-->'));
+        if (i < 0) continue;
+        const [a, b] = lines[i].split('-->');
+        const start = toSeconds(a), end = toSeconds(b.split(/\s/).filter(Boolean)[0] || '');
+        const body = lines.slice(i + 1).join(' ').replace(/<[^>]+>/g, '').trim();
+        if (start != null && body) out.push({ start, end: end ?? start, text: body });
+      }
+      return out;
+    }
+    // Plain text, with or without [mm:ss] or [hh:mm:ss] at the start of each line.
+    const out = [];
+    for (const line of text.split('\n')) {
+      const l = line.trim(); if (!l) continue;
+      const m = /^\[?((?:\d+:)?\d{1,2}:\d{2}(?:[.,]\d+)?)\]?\s+(.*)$/.exec(l);
+      if (m) out.push({ start: toSeconds(m[1]), end: toSeconds(m[1]), text: m[2] });
+      else if (out.length && out[out.length - 1].start == null) out[out.length - 1].text += ' ' + l;
+      else out.push({ start: null, end: null, text: l });
+    }
+    let t = 0;
+    out.forEach((s, i) => { if (s.start == null) s.start = t; t = s.start; const next = out[i + 1]; s.end = next && next.start != null ? next.start : s.start; });
+    return out;
+  }
+  $('importFile').addEventListener('change', async (e) => {
+    const f = e.target.files[0]; e.target.value = '';
+    if (!f || running) return;
+    try {
+      const segs = parseTranscript(await f.text(), f.name);
+      if (!segs.length) throw new Error('empty');
+      const r = rules();
+      segs.forEach((s) => (s.text = applyVocab(s.text, r)));
+      doc = { id: 'd' + Date.now(), name: f.name.replace(/\.[^.]+$/, ''), date: Date.now(), duration: Math.max(...segs.map((s) => s.end || s.start)), segments: segs, summary: '', context: '' };
+      renderTranscript(); renderSummary(); saveDoc();
+      setMsg(`Akosile imported ${segs.length} lines from ${f.name} and applied your corrections. Choose the matching recording to play it back.`);
+    } catch (err) {
+      setMsg('Akosile could not read ' + f.name + '. Import an SRT, VTT, JSON or timestamped TXT file.', true);
+    }
+  });
+
   // ---------- worker ----------
   function getWorker() {
     if (worker) return worker;
