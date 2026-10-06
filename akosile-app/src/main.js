@@ -24,7 +24,7 @@ import './style.css';
   };
 
   let doc = structuredClone(EXAMPLE);
-  let audioData = null, fileName = '', audioUrl = null, running = false, worker = null, runStart = 0;
+  let resumeAt = null, audioData = null, fileName = '', audioUrl = null, running = false, worker = null, runStart = 0;
 
   // ---------- helpers ----------
   const pad = (n, w = 2) => String(n).padStart(w, '0');
@@ -150,7 +150,7 @@ import './style.css';
   // ---------- file loading ----------
   async function takeFile(file) {
     if (!file || running) return;
-    fileName = file.name; setMsg('Reading the audio from ' + file.name); setBar(0);
+    fileName = file.name; resumeAt = null; $('resume').hidden = true; setMsg('Reading the audio from ' + file.name); setBar(0);
     if (audioUrl) URL.revokeObjectURL(audioUrl);
     audioUrl = URL.createObjectURL(file);
     const p = $('player'); p.src = audioUrl; p.hidden = false; p.playbackRate = +$('speed').value;
@@ -183,21 +183,67 @@ import './style.css';
     worker.onerror = (e) => { e.preventDefault(); finish('The transcription engine stopped unexpectedly. Reload the page and try the Small model.', true); };
     return worker;
   }
-  let totalWindows = 0;
+  let totalWindows = 0, loadingCached = false, savedList = [], cacheAvailable = true;
+  const MODEL_NAMES = {
+    'onnx-community/whisper-large-v3-turbo': 'Large v3 Turbo',
+    'onnx-community/whisper-small': 'Small',
+    'onnx-community/whisper-base': 'Base'
+  };
+  function showSaved(saved) {
+    if (!saved) return;
+    savedList = saved.models; cacheAvailable = saved.available;
+    for (const o of $('model').options) {
+      o.textContent = o.textContent.replace(/ · saved on this computer$/, '') + (savedList.includes(o.value) ? ' · saved on this computer' : '');
+    }
+    updateModelHelp();
+  }
+  function updateModelHelp() {
+    const id = $('model').value, name = MODEL_NAMES[id] || 'This model';
+    let text;
+    if (!cacheAvailable) text = 'This browser is not allowing Akosile to save the model, so it downloads again on every visit. Private or incognito windows cause this.';
+    else if (savedList.includes(id)) text = name + ' is saved on this computer, so it loads without downloading.';
+    else text = 'Your browser downloads ' + name + ' the first time and keeps it for later visits.';
+    if (storageNote) text += ' ' + storageNote;
+    $('modelHelp').textContent = text;
+  }
+  $('model').addEventListener('change', updateModelHelp);
+
+  // Asks the browser to keep saved models even when disk space runs low, and warns when space is short.
+  let storageNote = '';
+  async function checkStorage() {
+    try {
+      const persisted = await navigator.storage?.persisted?.() || await navigator.storage?.persist?.();
+      const est = await navigator.storage?.estimate?.();
+      if (est && est.quota && est.quota - (est.usage || 0) < 1.5e9) {
+        storageNote = 'Your computer is low on free space, so the browser may delete the saved model. Free up a few GB to keep it.';
+      } else if (persisted === false) {
+        storageNote = 'Bookmark this page so your browser is more likely to keep the model when space runs low.';
+      }
+      updateModelHelp();
+    } catch (e) {}
+  }
+
   function onWorker(e) {
     const m = e.data;
     if (m.type === 'probe') {
       const d = $('device'); d.textContent = m.gpu ? 'Graphics card ready (WebGPU)' : 'Processor only (no WebGPU)'; d.classList.toggle('gpu', m.gpu);
       $('noGpu').hidden = m.gpu;
-      if (!m.gpu) $('model').value = 'onnx-community/whisper-small';
+      if (!m.gpu && !store.get('settings', null)) $('model').value = 'onnx-community/whisper-small';
+      showSaved(m.saved);
       return;
+    }
+    if (m.type === 'saved') { showSaved(m.saved); return; }
+    if (m.type === 'loading') {
+      loadingCached = m.cached;
+      setMsg(m.cached ? 'Akosile is loading the saved model from this computer. Nothing is being downloaded.' : 'Akosile is downloading the model. Your browser saves it for next time.');
     }
     if (m.type === 'status') setMsg(m.text);
     if (m.type === 'note') toast(m.text);
     if (m.type === 'load') {
       setBar(m.progress);
       const mb = (x) => Math.round(x / 1048576);
-      setMsg(m.total ? `Downloading the model: ${mb(m.loaded)} of ${mb(m.total)} MB. This only happens once.` : 'Loading the model');
+      if (loadingCached) setMsg(`Akosile is loading the saved model from this computer (${Math.round(m.progress || 0)}%). Nothing is being downloaded.`);
+      else setMsg(m.total ? `Akosile is downloading the model: ${mb(m.loaded)} of ${mb(m.total)} MB. Your browser saves it, so this happens only once.` : 'Akosile is downloading the model.');
     }
     if (m.type === 'ready') { setBar(0); setMsg('The model is ready. Akosile is transcribing the first section.'); runStart = performance.now(); }
     if (m.type === 'plan') totalWindows = m.total;
@@ -205,30 +251,61 @@ import './style.css';
       const r = rules();
       appendSegments(m.items.map((s) => ({ ...s, text: applyVocab(s.text, r) })));
       setBar(m.done / m.total * 100);
+      resumeAt = m.audioDone;
       const el = (performance.now() - runStart) / 1000, left = el / m.done * (m.total - m.done);
-      setMsg(`Akosile has finished ${m.done} of ${m.total} sections. About ${clock(left)} remains.`);
+      const full = audioData ? audioData.length / SR : 0, H = full >= 3600;
+      setMsg(`Akosile has transcribed up to ${clock(m.audioDone, H)} of ${clock(full, H)}. About ${clock(left)} remains. Keep this tab open until it finishes.`);
     }
-    if (m.type === 'complete') finish('Akosile finished the transcript. Click any timestamp to check a passage against the audio.');
-    if (m.type === 'stopped') finish('Akosile stopped after ' + m.done + ' sections. The transcript so far is saved.');
+    if (m.type === 'complete') {
+      const full = audioData ? audioData.length / SR : 0, H = full >= 3600;
+      let text = `Akosile finished all ${m.total} sections and covered the full ${clock(full, H)}.`;
+      if (m.silent) text += ` It found no speech in ${m.silent} of them.`;
+      if (m.failed) text += ` It could not transcribe ${m.failed}, and the toast messages named where.`;
+      text += ' Click any timestamp to check a passage against the audio.';
+      resumeAt = null;
+      finish(text);
+    }
+    if (m.type === 'stopped') { resumeAt = m.resumeAt; finish('Akosile stopped at ' + clock(m.resumeAt) + '. The transcript so far is saved, and you can continue from there.'); }
     if (m.type === 'error') {
+      if (m.resumeAt != null) resumeAt = m.resumeAt;
       const hint = /fetch|network|Failed to load/i.test(m.text) ? ' Check your internet connection, because the first run downloads the model.' : '';
-      finish('Transcription failed: ' + m.text + '.' + hint, true);
+      finish('Transcription stopped with an error: ' + m.text + '.' + hint + (doc.segments.length ? ' You can continue from where it stopped.' : ''), true);
     }
   }
   function finish(text, err) {
     running = false; $('go').disabled = !audioData; $('stop').hidden = true; $('go').hidden = false;
+    releaseWake();
+    const canResume = audioData && resumeAt != null && doc.segments.length && resumeAt < audioData.length / SR - 1;
+    $('resume').hidden = !canResume;
+    if (canResume) $('resume').textContent = 'Continue from ' + clock(resumeAt);
     setMsg(text, err); if (!err) setBar(100);
     doc.duration = audioData ? audioData.length / SR : doc.duration;
     saveDoc();
   }
+  // Keeps the screen and laptop awake during a long run, where the browser allows it.
+  let wake = null;
+  async function holdWake() { try { wake = await navigator.wakeLock?.request('screen'); } catch (e) { wake = null; } }
+  function releaseWake() { try { wake?.release(); } catch (e) {} wake = null; }
+  document.addEventListener('visibilitychange', () => { if (running && document.visibilityState === 'visible') holdWake(); });
+
+  function startRun(startAt) {
+    running = true;
+    $('go').hidden = true; $('stop').hidden = false; $('resume').hidden = true;
+    store.set('settings', { model: $('model').value, lang: $('lang').value, task: $('task').value });
+    holdWake();
+    getWorker().postMessage({ type: 'run', model: $('model').value, audio: audioData.slice(), opts: { language: $('lang').value || null, task: $('task').value, startAt } });
+  }
   $('go').addEventListener('click', () => {
     if (!audioData || running) return;
-    running = true;
+    resumeAt = null;
     doc = { id: 'd' + Date.now(), name: fileName.replace(/\.[^.]+$/, '') || 'Recording', date: Date.now(), duration: audioData.length / SR, segments: [], summary: '', context: $('context').value === EXAMPLE.context ? '' : $('context').value };
     renderTranscript(); renderSummary();
-    $('go').hidden = true; $('stop').hidden = false;
-    store.set('settings', { model: $('model').value, lang: $('lang').value, task: $('task').value });
-    getWorker().postMessage({ type: 'run', model: $('model').value, audio: audioData.slice(), opts: { language: $('lang').value || null, task: $('task').value } });
+    startRun(0);
+  });
+  $('resume').addEventListener('click', () => {
+    if (!audioData || running || resumeAt == null) return;
+    setMsg('Akosile is continuing from ' + clock(resumeAt) + '.');
+    startRun(resumeAt);
   });
   $('stop').addEventListener('click', () => { worker?.postMessage({ type: 'stop' }); setMsg('Akosile will stop when the current section finishes.'); });
   $('applyVocab').addEventListener('click', () => {
@@ -327,6 +404,7 @@ ${plain(true)}`;
   $('apiKey').value = store.get('apiKey', '');
   $('apiModel').value = store.get('apiModel', 'claude-sonnet-5-5');
   renderTranscript(); renderSummary(); renderHistory();
+  checkStorage();
   try { getWorker().postMessage({ type: 'probe' }); }
   catch (e) { $('device').textContent = 'Engine unavailable'; setMsg('This browser blocked the transcription engine. Open Akosile in Chrome or Edge instead.', true); }
 })();
